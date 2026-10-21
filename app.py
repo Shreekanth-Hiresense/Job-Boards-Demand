@@ -183,6 +183,9 @@ with st.sidebar:
     B = BOARDS[board_name]
     st.divider()
     st.markdown("#### Filters")
+    families_all = [r[0] for r in con().execute(
+        "SELECT DISTINCT job_family FROM jobs ORDER BY 1").fetchall()]
+    sel_families = st.multiselect("Job family", families_all, placeholder="all job families")
     kw = st.text_input("Title contains", placeholder="e.g. data engineer")
     f_company = st.text_input("Company contains", placeholder="any company…")
     f_role = st.text_input("Role contains", placeholder="any role…")
@@ -210,6 +213,8 @@ if f_city:
     where.append("city ILIKE ?"); p.append(f"%{f_city}%")
 if sel_states:
     where.append(f"state IN ({','.join(['?']*len(sel_states))})"); p += sel_states
+if sel_families:
+    where.append(f"job_family IN ({','.join(['?']*len(sel_families))})"); p += sel_families
 if (isinstance(date_range, (list, tuple)) and len(date_range) == 2
         and (date_range[0] != dmin or date_range[1] != dmax)):   # only filter if narrowed (keeps null-date rows in totals)
     where.append("posted_on::date BETWEEN ? AND ?"); p += [date_range[0], date_range[1]]
@@ -317,8 +322,8 @@ with tabs[1]:
         ("Median monthly", inr(cov.p50), "50th percentile"),
         ("p75 monthly", inr(cov.p75), "upper quartile"),
     ])
-    dim = st.radio("Break pay down by", ["Role", "City", "Experience band", "Board"], horizontal=True)
-    col = {"Role": "role", "City": "city", "Experience band": None, "Board": "board"}[dim]
+    dim = st.radio("Break pay down by", ["Job family", "Role", "City", "Experience band", "Board"], horizontal=True)
+    col = {"Job family": "job_family", "Role": "role", "City": "city", "Experience band": None, "Board": "board"}[dim]
     if dim == "Experience band":
         q_ = f"""SELECT CASE
                    WHEN exp_years IS NULL THEN '(unknown)'
@@ -335,7 +340,7 @@ with tabs[1]:
         df = run(q_, p)
         xcol = "band"
     else:
-        ok = {"role": ROLE_OK, "city": CITY_OK, "board": "1=1"}[col]
+        ok = {"role": ROLE_OK, "city": CITY_OK, "board": "1=1", "job_family": "1=1"}[col]
         df = run(f"""SELECT {col} AS "{col}", count(salary_monthly_min) n,
                      round(quantile_cont(salary_monthly_min,0.25)) p25,
                      round(quantile_cont(salary_monthly_min,0.50)) p50,
