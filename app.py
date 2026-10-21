@@ -176,6 +176,7 @@ def kpi_row(items):
 
 
 # ---------------------------------------------------------------- sidebar: board + filters
+EXP_BANDS = ["Fresher", "0–1 yrs", "1–3 yrs", "3–5 yrs", "5–8 yrs", "8–12 yrs", "12+ yrs"]
 css()
 with st.sidebar:
     st.markdown("### \U0001F4CA Talent Demand Intelligence")
@@ -185,7 +186,17 @@ with st.sidebar:
     st.markdown("#### Filters")
     families_all = [r[0] for r in con().execute(
         "SELECT DISTINCT job_family FROM jobs ORDER BY 1").fetchall()]
-    sel_families = st.multiselect("Job family", families_all, placeholder="all job families")
+    sel_families = st.multiselect("Job family (L1)", families_all, placeholder="all job families")
+    # L2 sub-categories, cascaded to the chosen L1 families (or all of them if none chosen)
+    if sel_families:
+        _ph = ",".join(["?"] * len(sel_families))
+        subs_all = [r[0] for r in con().execute(
+            f"SELECT DISTINCT sub_family FROM jobs WHERE job_family IN ({_ph}) ORDER BY 1",
+            sel_families).fetchall()]
+    else:
+        subs_all = [r[0] for r in con().execute(
+            "SELECT DISTINCT sub_family FROM jobs ORDER BY 1").fetchall()]
+    sel_subs = st.multiselect("Sub-category (L2)", subs_all, placeholder="all sub-categories")
     kw = st.text_input("Title contains", placeholder="e.g. data engineer")
     f_company = st.text_input("Company contains", placeholder="any company…")
     f_role = st.text_input("Role contains", placeholder="any role…")
@@ -193,10 +204,14 @@ with st.sidebar:
     states_all = [r[0] for r in con().execute(
         "SELECT DISTINCT state FROM jobs WHERE state<>'(unknown)' ORDER BY 1").fetchall()]
     sel_states = st.multiselect("State", states_all, placeholder="all states")
+    sectors_all = [r[0] for r in con().execute(
+        "SELECT DISTINCT industry_sector FROM jobs WHERE industry_sector IS NOT NULL ORDER BY 1").fetchall()]
+    sel_sectors = st.multiselect("Industry sector", sectors_all, placeholder="all sectors (Foundit)",
+                                 help="True industry sector — supplied by Foundit only (~7% of all jobs).")
+    sel_exp = st.multiselect("Experience", EXP_BANDS, placeholder="all experience levels")
     dmin, dmax = one("SELECT min(posted_on), max(posted_on) FROM jobs")
     dmin, dmax = pd.to_datetime(dmin).date(), pd.to_datetime(dmax).date()
     date_range = st.date_input("Posted between", value=(dmin, dmax), min_value=dmin, max_value=dmax)
-    exp_hi = st.slider("Max experience (yrs)", 0, 30, 30)
     wfh_only = st.checkbox("Work-from-home only")
 
 # WHERE builder
@@ -215,11 +230,15 @@ if sel_states:
     where.append(f"state IN ({','.join(['?']*len(sel_states))})"); p += sel_states
 if sel_families:
     where.append(f"job_family IN ({','.join(['?']*len(sel_families))})"); p += sel_families
+if sel_subs:
+    where.append(f"sub_family IN ({','.join(['?']*len(sel_subs))})"); p += sel_subs
+if sel_sectors:
+    where.append(f"industry_sector IN ({','.join(['?']*len(sel_sectors))})"); p += sel_sectors
+if sel_exp:
+    where.append(f"exp_band IN ({','.join(['?']*len(sel_exp))})"); p += sel_exp
 if (isinstance(date_range, (list, tuple)) and len(date_range) == 2
         and (date_range[0] != dmin or date_range[1] != dmax)):   # only filter if narrowed (keeps null-date rows in totals)
     where.append("posted_on::date BETWEEN ? AND ?"); p += [date_range[0], date_range[1]]
-if exp_hi < 30:
-    where.append("(exp_years IS NULL OR exp_years <= ?)"); p.append(exp_hi)
 if wfh_only:
     where.append("is_wfh = TRUE")
 W = " AND ".join(where)
@@ -308,7 +327,7 @@ with tabs[0]:
 with tabs[1]:
     st.markdown('<div class="note">Pay is normalized to <b>monthly ₹</b> for comparability '
                 '(apna/workindia/jobhai/quikr are monthly; foundit/ncs are annual → ÷12). '
-                'Values of 0 = "not disclosed" (excluded); figures clipped to ₹1k–₹50L/month to drop junk. '
+                'Values of 0 = "not disclosed" (excluded); figures clipped to ₹3k–₹50L/month to drop junk. '
                 '<b>p25 / p50 / p75</b> = 25th / median / 75th percentile.</div>', unsafe_allow_html=True)
     cov = run(f"""SELECT count(*) n, count(salary_monthly_min) disc,
                   round(quantile_cont(salary_monthly_min,0.25)) p25,
@@ -322,25 +341,26 @@ with tabs[1]:
         ("Median monthly", inr(cov.p50), "50th percentile"),
         ("p75 monthly", inr(cov.p75), "upper quartile"),
     ])
-    dim = st.radio("Break pay down by", ["Job family", "Role", "City", "Experience band", "Board"], horizontal=True)
-    col = {"Job family": "job_family", "Role": "role", "City": "city", "Experience band": None, "Board": "board"}[dim]
+    dim = st.radio("Break pay down by",
+                   ["Job family", "Sub-category", "Role", "City", "Experience band", "Industry sector", "Board"],
+                   horizontal=True)
+    col = {"Job family": "job_family", "Sub-category": "sub_family", "Role": "role", "City": "city",
+           "Experience band": None, "Industry sector": "industry_sector", "Board": "board"}[dim]
     if dim == "Experience band":
-        q_ = f"""SELECT CASE
-                   WHEN exp_years IS NULL THEN '(unknown)'
-                   WHEN exp_years<2 THEN '0-2 yrs' WHEN exp_years<5 THEN '2-5 yrs'
-                   WHEN exp_years<8 THEN '5-8 yrs' WHEN exp_years<12 THEN '8-12 yrs'
-                   ELSE '12+ yrs' END band,
+        q_ = f"""SELECT exp_band band,
                  count(salary_monthly_min) n,
                  round(quantile_cont(salary_monthly_min,0.25)) p25,
                  round(quantile_cont(salary_monthly_min,0.50)) p50,
                  round(quantile_cont(salary_monthly_min,0.75)) p75
-                 FROM jobs WHERE {W} AND salary_monthly_min IS NOT NULL GROUP BY 1
-                 ORDER BY CASE band WHEN '0-2 yrs' THEN 1 WHEN '2-5 yrs' THEN 2 WHEN '5-8 yrs' THEN 3
-                                    WHEN '8-12 yrs' THEN 4 WHEN '12+ yrs' THEN 5 ELSE 6 END"""
+                 FROM jobs WHERE {W} AND salary_monthly_min IS NOT NULL AND exp_band<>'Not specified' GROUP BY 1
+                 ORDER BY CASE band WHEN 'Fresher' THEN 0 WHEN '0–1 yrs' THEN 1 WHEN '1–3 yrs' THEN 2
+                                    WHEN '3–5 yrs' THEN 3 WHEN '5–8 yrs' THEN 4 WHEN '8–12 yrs' THEN 5
+                                    WHEN '12+ yrs' THEN 6 ELSE 7 END"""
         df = run(q_, p)
         xcol = "band"
     else:
-        ok = {"role": ROLE_OK, "city": CITY_OK, "board": "1=1", "job_family": "1=1"}[col]
+        ok = {"role": ROLE_OK, "city": CITY_OK, "board": "1=1", "job_family": "1=1",
+              "sub_family": "1=1", "industry_sector": "industry_sector IS NOT NULL"}[col]
         df = run(f"""SELECT {col} AS "{col}", count(salary_monthly_min) n,
                      round(quantile_cont(salary_monthly_min,0.25)) p25,
                      round(quantile_cont(salary_monthly_min,0.50)) p50,
@@ -379,14 +399,16 @@ with tabs[2]:
         st.caption(f"{total:,} distinct {label} match — top 500 by postings (search to reach any one).")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    sub = st.radio("Dimension", ["Roles", "Industries", "Skills", "Work type"], horizontal=True)
+    sub = st.radio("Dimension", ["Roles", "Industry sector", "Skills", "Work type"], horizontal=True)
     if sub == "Roles":
         explorer("role", "roles", ROLE_OK)
-    elif sub == "Industries":
-        st.markdown('<div class="note">Industry is provided by WorkIndia (100%), Foundit (95%) and '
-                    'Jobhai (32%); apna/ncs/quikr do not supply it, so this view covers ~51% of postings.</div>',
+    elif sub == "Industry sector":
+        st.markdown('<div class="note">A true <b>industry sector</b> is supplied only by Foundit (as a '
+                    'classified field), so this view covers ~7% of all postings. We deliberately do not treat '
+                    'other boards’ "industry" field (which is really a job-category) as an industry sector '
+                    '— those are reflected in the Job family / Sub-category instead.</div>',
                     unsafe_allow_html=True)
-        explorer("industry", "industries", "industry IS NOT NULL AND industry<>''")
+        explorer("industry_sector", "industry sectors", "industry_sector IS NOT NULL")
     elif sub == "Skills":
         st.markdown('<div class="note">Skills are free-text and present on ~38% of postings '
                     '(ncs/foundit/workindia strongest). Shown as provided, exact counts.</div>', unsafe_allow_html=True)
@@ -508,7 +530,7 @@ with tabs[6]:
       jobhai URL epoch, ncs page date, foundit datePosted, quikr JSON-LD datePosted), standardized to IST.<br>
       • <b>Geography</b>: raw location → canonical city + state via an alias/locality map; raw kept.<br>
       • <b>Pay</b>: normalized to monthly ₹ (foundit/ncs annual ÷12); 0 = not disclosed; clipped to
-      ₹1k–₹50L/month. Disclosure rates vary by source (see "pay" column) and are shown, never hidden.<br>
+      ₹3k–₹50L/month. Disclosure rates vary by source (see "pay" column) and are shown, never hidden.<br>
       • <b>Not inflated</b>: ranked lists drop "(not specified)"/placeholder buckets but totals keep them;
       "distinct roles/companies" are raw source values, not merged.<br>
       • <b>Read-only</b>: this dashboard only reads a data snapshot; it never writes to the database.
@@ -518,9 +540,9 @@ with tabs[6]:
 with tabs[7]:
     st.caption(f"{grp(k.jobs)} postings match. Showing the 1,000 most recent; download the full "
                f"filtered set below. Each row links to the live posting.")
-    rows = run(f"""SELECT board, title, company, city, state, role, industry,
-                   salary_monthly_min, salary_monthly_max, experience, employment_type_norm AS work_type,
-                   is_wfh, posted_on, url
+    rows = run(f"""SELECT board, title, company, city, state, job_family, sub_family, role,
+                   industry_sector, salary_monthly_min, salary_monthly_max, experience, exp_band,
+                   employment_type_norm AS work_type, is_wfh, posted_on, url
                    FROM jobs WHERE {W} ORDER BY posted_on DESC NULLS LAST LIMIT 1000""", p)
     st.dataframe(rows, use_container_width=True, hide_index=True, height=560, column_config={
         "url": st.column_config.LinkColumn("link", display_text="open ↗"),
@@ -529,8 +551,10 @@ with tabs[7]:
         "salary_monthly_max": st.column_config.NumberColumn("pay max/mo", format="₹%d")})
     # build the full CSV only on demand (keeps memory flat; 900k+ rows aren't materialized on every view)
     if st.checkbox(f"Prepare download of all {grp(k.jobs)} filtered records"):
-        full = con().execute(f"""SELECT board, job_id, title, company, city, state, location, role, industry,
-                   salary_min, salary_max, salary_monthly_min, salary_monthly_max, experience, exp_years,
+        full = con().execute(f"""SELECT board, job_id, title, company, city, state, location,
+                   job_family, sub_family, role, industry, industry_sector,
+                   salary_min, salary_max, salary_monthly_min, salary_monthly_max,
+                   experience, exp_min_years, exp_max_years, exp_band,
                    employment_type, employment_type_norm, education, skills, is_wfh, posted_on, url
                    FROM jobs WHERE {W} ORDER BY posted_on DESC NULLS LAST""", p).df()
         st.download_button(f"⬇ Download CSV ({grp(len(full))} rows)",
