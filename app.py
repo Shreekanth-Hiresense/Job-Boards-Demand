@@ -422,32 +422,41 @@ with tabs[3]:
 with tabs[4]:
     cc1, cc2 = st.columns([1, 1])
     with cc1:
-        g = st.radio("Granularity", ["Weekly", "Monthly"], horizontal=True, key="gran")
+        g = st.radio("Granularity", ["Daily", "Weekly", "Monthly"], index=1, horizontal=True, key="gran")
     with cc2:
-        win = st.radio("Window", ["12 weeks", "26 weeks", "52 weeks", "All"], index=1, horizontal=True, key="win")
-    unit = "week" if g == "Weekly" else "month"
-    daysmap = {"12 weeks": 84, "26 weeks": 182, "52 weeks": 364, "All": None}
+        if g == "Daily":
+            win = st.radio("Window", ["7 days", "14 days", "30 days", "90 days"], index=1, horizontal=True, key="wind")
+            days = {"7 days": 7, "14 days": 14, "30 days": 30, "90 days": 90}[win]
+        else:
+            win = st.radio("Window", ["12 weeks", "26 weeks", "52 weeks", "All"], index=1, horizontal=True, key="winw")
+            days = {"12 weeks": 84, "26 weeks": 182, "52 weeks": 364, "All": None}[win]
     Wt, pt = f"{W} AND posted_on IS NOT NULL", list(p)
-    if daysmap[win]:
-        Wt += " AND posted_on::date >= ?"; pt.append(dmax - pd.Timedelta(days=daysmap[win]))
+    if days:
+        Wt += " AND posted_on::date >= ?"; pt.append(dmax - pd.Timedelta(days=days))
+    per = "posted_on::date" if g == "Daily" else f"date_trunc('{'week' if g == 'Weekly' else 'month'}', posted_on)::date"
+    label = "day" if g == "Daily" else ("week" if g == "Weekly" else "month")
     st.markdown('<div class="note">Job postings counted by their <b>posting date</b> (the real post date '
-                'from each source), newest period first. The newest period is partial (still in progress), '
-                'so it reads low. <b>change</b> = vs. the previous period.</div>', unsafe_allow_html=True)
-    df = run(f"SELECT date_trunc('{unit}', posted_on)::date period, count(*) postings "
-             f"FROM jobs WHERE {Wt} GROUP BY 1 ORDER BY 1", pt)
+                'from each source), newest first. The latest period is partial (still in progress), so it '
+                'reads low. <b>change</b> = vs. the previous period.</div>', unsafe_allow_html=True)
+    if g == "Daily":
+        df = run(f"SELECT {per} AS date, dayname(posted_on) AS weekday, count(*) postings "
+                 f"FROM jobs WHERE {Wt} GROUP BY 1,2 ORDER BY 1", pt)
+        key_col = "date"
+    else:
+        df = run(f"SELECT {per} AS period, count(*) postings FROM jobs WHERE {Wt} GROUP BY 1 ORDER BY 1", pt)
+        key_col = "period"
     if len(df):
         df["change"] = df["postings"].pct_change().map(lambda v: f"{v*100:+.0f}%" if pd.notna(v) else "—")
         df = df.iloc[::-1].reset_index(drop=True)
-        st.markdown(f'<div class="sec">Postings per {unit} · {win}</div>', unsafe_allow_html=True)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=430)
+        st.markdown(f'<div class="sec">Postings per {label} · {win}</div>', unsafe_allow_html=True)
+        st.dataframe(df, use_container_width=True, hide_index=True, height=460)
     if not B["key"]:
-        st.markdown(f'<div class="sec">Postings per {unit} by source</div>', unsafe_allow_html=True)
-        dfb = run(f"SELECT date_trunc('{unit}', posted_on)::date period, board, count(*) n "
-                  f"FROM jobs WHERE {Wt} GROUP BY 1,2", pt)
+        st.markdown(f'<div class="sec">Postings per {label} by source</div>', unsafe_allow_html=True)
+        dfb = run(f"SELECT {per} AS {key_col}, board, count(*) n FROM jobs WHERE {Wt} GROUP BY 1,2", pt)
         if len(dfb):
-            piv = dfb.pivot(index="period", columns="board", values="n").fillna(0).astype(int)
+            piv = dfb.pivot(index=key_col, columns="board", values="n").fillna(0).astype(int)
             piv = piv.sort_index(ascending=False).reset_index()
-            st.dataframe(piv, use_container_width=True, hide_index=True, height=430)
+            st.dataframe(piv, use_container_width=True, hide_index=True, height=460)
 
 # ================================================================ EMPLOYERS
 with tabs[5]:
