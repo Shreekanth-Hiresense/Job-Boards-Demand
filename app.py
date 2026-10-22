@@ -101,6 +101,13 @@ def css():
       html,body,[class*="css"]{font-family:'Inter',sans-serif;color:#eef2f8;}
       .block-container{padding-top:.6rem;padding-bottom:3rem;max-width:1580px;}
       #MainMenu,footer,header{visibility:hidden;}
+      /* keep the Filters sidebar ALWAYS open -- not collapsible, so filters can never be lost */
+      [data-testid="stSidebarCollapseButton"]{display:none !important;}
+      section[data-testid="stSidebar"]{transform:none !important; visibility:visible !important;
+        margin-left:0 !important; min-width:300px !important;}
+      section[data-testid="stSidebar"][aria-expanded="false"]{width:300px !important;}
+      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarContent"]{
+        visibility:visible !important; display:flex !important;}
       /* sidebar as a control panel */
       section[data-testid="stSidebar"]{background:#080c13;border-right:1px solid var(--line);}
       section[data-testid="stSidebar"] .block-container{padding-top:1.2rem;}
