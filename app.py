@@ -460,11 +460,18 @@ with tabs[4]:
     Wt, pt = f"{W} AND posted_on IS NOT NULL", list(p)
     if days:
         Wt += " AND posted_on::date >= ?"; pt.append(dmax - pd.Timedelta(days=days))
-    per = "posted_on::date" if g == "Daily" else f"date_trunc('{'week' if g == 'Weekly' else 'month'}', posted_on)::date"
+    # format the period as a clean date string (no 00:00:00 time); ISO keeps it sortable
+    if g == "Daily":
+        per = "strftime(posted_on, '%Y-%m-%d')"
+    elif g == "Weekly":
+        per = "strftime(date_trunc('week', posted_on), '%Y-%m-%d')"
+    else:
+        per = "strftime(date_trunc('month', posted_on), '%Y-%m')"
     label = "day" if g == "Daily" else ("week" if g == "Weekly" else "month")
     st.markdown('<div class="note">Job postings counted by their <b>posting date</b> (the real post date '
-                'from each source), newest first. The latest period is partial (still in progress), so it '
-                'reads low. <b>change</b> = vs. the previous period.</div>', unsafe_allow_html=True)
+                'from each source), newest first. Weekly/monthly rows are labelled by the <b>start</b> of that '
+                'week/month. The latest period is partial (still in progress), so it reads low. '
+                '<b>change</b> = vs. the previous period.</div>', unsafe_allow_html=True)
     if g == "Daily":
         df = run(f"SELECT {per} AS date, dayname(posted_on) AS weekday, count(*) postings "
                  f"FROM jobs WHERE {Wt} GROUP BY 1,2 ORDER BY 1", pt)
