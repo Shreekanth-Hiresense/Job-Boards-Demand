@@ -54,7 +54,7 @@ def con():
 
 @st.cache_data(show_spinner=False, max_entries=256)   # bound cache so memory stays flat
 def q(sql, params, _v):
-    return con().execute(sql, list(params)).df()
+    return con().cursor().execute(sql, list(params)).df()
 
 
 def run(sql, params=()):
@@ -62,7 +62,7 @@ def run(sql, params=()):
 
 
 def one(sql, params=()):
-    return con().execute(sql, list(params)).fetchone()
+    return con().cursor().execute(sql, list(params)).fetchone()
 
 
 # ---------------------------------------------------------------- formatting
@@ -184,27 +184,27 @@ with st.sidebar:
     B = BOARDS[board_name]
     st.divider()
     st.markdown("#### Filters")
-    families_all = [r[0] for r in con().execute(
+    families_all = [r[0] for r in con().cursor().execute(
         "SELECT DISTINCT job_family FROM jobs ORDER BY 1").fetchall()]
     sel_families = st.multiselect("Job family (L1)", families_all, placeholder="all job families")
     # L2 sub-categories, cascaded to the chosen L1 families (or all of them if none chosen)
     if sel_families:
         _ph = ",".join(["?"] * len(sel_families))
-        subs_all = [r[0] for r in con().execute(
+        subs_all = [r[0] for r in con().cursor().execute(
             f"SELECT DISTINCT sub_family FROM jobs WHERE job_family IN ({_ph}) ORDER BY 1",
             sel_families).fetchall()]
     else:
-        subs_all = [r[0] for r in con().execute(
+        subs_all = [r[0] for r in con().cursor().execute(
             "SELECT DISTINCT sub_family FROM jobs ORDER BY 1").fetchall()]
     sel_subs = st.multiselect("Sub-category (L2)", subs_all, placeholder="all sub-categories")
     kw = st.text_input("Title contains", placeholder="e.g. data engineer")
     f_company = st.text_input("Company contains", placeholder="any company…")
     f_role = st.text_input("Role contains", placeholder="any role…")
     f_city = st.text_input("City contains", placeholder="any city…")
-    states_all = [r[0] for r in con().execute(
+    states_all = [r[0] for r in con().cursor().execute(
         "SELECT DISTINCT state FROM jobs WHERE state<>'(unknown)' ORDER BY 1").fetchall()]
     sel_states = st.multiselect("State", states_all, placeholder="all states")
-    sectors_all = [r[0] for r in con().execute(
+    sectors_all = [r[0] for r in con().cursor().execute(
         "SELECT DISTINCT industry_sector FROM jobs WHERE industry_sector IS NOT NULL ORDER BY 1").fetchall()]
     sel_sectors = st.multiselect("Industry sector", sectors_all, placeholder="all sectors (Foundit)",
                                  help="True industry sector — supplied by Foundit only (~7% of all jobs).")
@@ -558,7 +558,7 @@ with tabs[7]:
         "salary_monthly_max": st.column_config.NumberColumn("pay max/mo", format="₹%d")})
     # build the full CSV only on demand (keeps memory flat; 900k+ rows aren't materialized on every view)
     if st.checkbox(f"Prepare download of all {grp(k.jobs)} filtered records"):
-        full = con().execute(f"""SELECT board, job_id, title, company, city, state, location,
+        full = con().cursor().execute(f"""SELECT board, job_id, title, company, city, state, location,
                    job_family, sub_family, role, industry, industry_sector,
                    salary_min, salary_max, salary_monthly_min, salary_monthly_max,
                    experience, exp_min_years, exp_max_years, exp_band,
