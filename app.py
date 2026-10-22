@@ -216,6 +216,9 @@ with st.sidebar:
     sel_sectors = st.multiselect("Industry sector", sectors_all, placeholder="all sectors (Foundit)",
                                  help="True industry sector — supplied by Foundit only (~7% of all jobs).")
     sel_exp = st.multiselect("Experience", EXP_BANDS, placeholder="all experience levels")
+    sel_gender = st.multiselect("Gender preference", ["Male only", "Female only", "Any (Both)"],
+                                placeholder="any gender preference",
+                                help="Gender stated in the posting — apna/workindia/quikr supply it (~22% of all jobs).")
     dmin, dmax = one("SELECT min(posted_on), max(posted_on) FROM jobs")
     dmin, dmax = pd.to_datetime(dmin).date(), pd.to_datetime(dmax).date()
     date_range = st.date_input("Posted between", value=(dmin, dmax), min_value=dmin, max_value=dmax)
@@ -243,6 +246,8 @@ if sel_sectors:
     where.append(f"industry_sector IN ({','.join(['?']*len(sel_sectors))})"); p += sel_sectors
 if sel_exp:
     where.append(f"exp_band IN ({','.join(['?']*len(sel_exp))})"); p += sel_exp
+if sel_gender:
+    where.append(f"gender_norm IN ({','.join(['?']*len(sel_gender))})"); p += sel_gender
 if (isinstance(date_range, (list, tuple)) and len(date_range) == 2
         and (date_range[0] != dmin or date_range[1] != dmax)):   # only filter if narrowed (keeps null-date rows in totals)
     where.append("posted_on::date BETWEEN ? AND ?"); p += [date_range[0], date_range[1]]
@@ -397,6 +402,10 @@ with tabs[2]:
         if find:
             w2 += f" AND {dim} ILIKE ?"; p2 += [f"%{find}%"]
         total = one(f"SELECT count(DISTINCT {dim}) FROM jobs WHERE {w2}", p2)[0]
+        if not total and not find:
+            st.info(f"**{board_name}** doesn’t provide {label}. Try another board, or switch Source to "
+                    f"“All boards”.")
+            return
         df = run(f"""SELECT {dim} AS "{label[:-1]}", count(*) postings,
                      count(DISTINCT company) employers,
                      count(salary_monthly_min) with_pay,
@@ -406,9 +415,20 @@ with tabs[2]:
         st.caption(f"{total:,} distinct {label} match — top 500 by postings (search to reach any one).")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    sub = st.radio("Dimension", ["Roles", "Industry sector", "Skills", "Work type"], horizontal=True)
+    sub = st.radio("Dimension", ["Roles", "Industry sector", "Skills", "Gender", "Work type"], horizontal=True)
     if sub == "Roles":
         explorer("role", "roles", ROLE_OK)
+    elif sub == "Gender":
+        st.markdown('<div class="note">Gender preference <b>as stated in the posting</b>. Supplied by '
+                    'WorkIndia (100%), apna (12%) and quikr; jobhai/ncs/foundit don’t state it — so overall '
+                    'about ~22% of postings specify a preference. A sobering look at hiring bias in the market.</div>',
+                    unsafe_allow_html=True)
+        gdf = run(f"""SELECT gender_norm AS "gender preference", count(*) postings,
+                      count(DISTINCT company) employers, count(salary_monthly_min) with_pay,
+                      round(median(salary_monthly_min)) median_monthly
+                      FROM jobs WHERE {W} GROUP BY 1 ORDER BY postings DESC""", p)
+        gdf["median_monthly"] = gdf["median_monthly"].map(inr)
+        st.dataframe(gdf, use_container_width=True, hide_index=True)
     elif sub == "Industry sector":
         st.markdown('<div class="note">A true <b>industry sector</b> is supplied only by Foundit (as a '
                     'classified field), so this view covers ~7% of all postings. We deliberately do not treat '
@@ -435,6 +455,10 @@ with tabs[3]:
                 '(e.g. "Bengaluru/Bangalore", "Bengaluru, India", "Whitefield, Bangalore" → '
                 '<b>Bengaluru, Karnataka</b>). Raw location is retained in the job records tab.</div>',
                 unsafe_allow_html=True)
+    if B["key"] == "ncs":
+        st.warning("**NCS lists location at state/region level only** — a real city exists for just ~7% of "
+                   "NCS jobs, so the Cities table is sparse and odd regional names (e.g. “Central Region "
+                   "Trichirapalli”) are NCS’s own wording. Use the **States** panel for NCS geography.")
     c1, c2 = st.columns([3, 2])
     with c1:
         df = run(f"""SELECT city, any_value(state) AS "state", count(*) postings,
@@ -471,7 +495,7 @@ with tabs[4]:
     if g == "Daily":
         per = "strftime(posted_on, '%Y-%m-%d')"
     elif g == "Weekly":
-        per = "strftime(date_trunc('week', posted_on), '%Y-%m-%d')"
+        per = "'Week of ' || strftime(date_trunc('week', posted_on), '%Y-%m-%d')"
     else:
         per = "strftime(date_trunc('month', posted_on), '%Y-%m')"
     label = "day" if g == "Daily" else ("week" if g == "Weekly" else "month")
