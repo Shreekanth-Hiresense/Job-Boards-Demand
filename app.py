@@ -193,47 +193,59 @@ def dl_csv(df, fname, key, label="⬇ Download table (CSV)"):
 
 
 # ---------------------------------------------------------------- chart builders
+def _clip(s, n=26):
+    s = str(s)
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
 def bar_h(df, cat, val, title, n=15, color=ACCENT):
-    """Horizontal magnitude bar — biggest on top, direct value labels."""
+    """Horizontal magnitude bar — biggest on top, direct value labels. Rendered full-width so
+    long category labels have room (automargin fits them) and never collide with the bars."""
     d = df.head(n).copy()[::-1]
+    headroom = float(d[val].max()) * 1.16 if len(d) else 1   # room for the outside value labels
     fig = go.Figure(go.Bar(
-        y=d[cat].astype(str), x=d[val], orientation="h",
-        marker=dict(color=color),
+        y=[_clip(v, 34) for v in d[cat]], x=d[val], orientation="h",
+        marker=dict(color=color), width=0.7,
         text=[f"{int(v):,}" for v in d[val]], textposition="outside",
-        textfont=dict(color="#aab4c8", size=11),
+        textfont=dict(color="#aab4c8", size=11), cliponaxis=False,
         hovertemplate="<b>%{y}</b><br>%{x:,} postings<extra></extra>"))
     sty(fig)
-    fig.update_layout(title=dict(text=title), height=max(260, 30 * len(d) + 80),
-                      margin=dict(l=6, r=66, t=46, b=8))
-    fig.update_xaxes(title_text="")
+    fig.update_layout(title=dict(text=title, x=0, xanchor="left", font=dict(size=13)),
+                      height=max(300, 33 * len(d) + 92), bargap=0.3,
+                      margin=dict(l=8, r=78, t=50, b=30))
+    fig.update_xaxes(title_text="", range=[0, headroom])
     fig.update_yaxes(title_text="", automargin=True)
     return fig
 
 
-def dumbbell(df, cat, title, n=16):
-    """Percentile range per category: p25 — median — p75 (monthly ₹)."""
+def dumbbell(df, cat, title, n=12):
+    """Percentile range per category: p25 — median — p75 (monthly ₹). The section header
+    above the chart names it, so the figure carries NO title (keeps the legend clear)."""
     d = df.head(n).copy()[::-1]
-    y = d[cat].astype(str)
+    y = [_clip(v) for v in d[cat]]
     fig = go.Figure()
     for yy, a, b in zip(y, d["p25"], d["p75"]):
         fig.add_trace(go.Scatter(x=[a, b], y=[yy, yy], mode="lines",
-                      line=dict(color="rgba(127,139,173,.45)", width=5),
+                      line=dict(color="rgba(127,139,173,.5)", width=5),
                       hoverinfo="skip", showlegend=False))
     fig.add_trace(go.Scatter(x=d["p25"], y=y, mode="markers", name="p25 (lower)",
-                  marker=dict(color=MUTE, size=10),
+                  marker=dict(color=MUTE, size=12),
                   hovertemplate="%{y}<br>p25 ₹%{x:,.0f}/mo<extra></extra>"))
     fig.add_trace(go.Scatter(x=d["p75"], y=y, mode="markers", name="p75 (upper)",
-                  marker=dict(color=ACCENT2, size=10),
+                  marker=dict(color=ACCENT2, size=12),
                   hovertemplate="%{y}<br>p75 ₹%{x:,.0f}/mo<extra></extra>"))
     fig.add_trace(go.Scatter(x=d["p50"], y=y, mode="markers", name="median",
-                  marker=dict(color=GOLD, size=14, line=dict(color="#0b111c", width=1.5)),
+                  marker=dict(color=GOLD, size=16, line=dict(color="#0b111c", width=1.6)),
                   hovertemplate="%{y}<br>median ₹%{x:,.0f}/mo<extra></extra>"))
     sty(fig)
-    fig.update_layout(title=dict(text=title), height=max(320, 34 * len(d) + 110),
-                      margin=dict(l=6, r=18, t=58, b=8),
-                      legend=dict(orientation="h", y=1.07, x=0, yanchor="bottom"))
-    fig.update_xaxes(title_text="monthly ₹", tickprefix="₹", separatethousands=True)
-    fig.update_yaxes(title_text="", automargin=True)
+    fig.update_layout(height=max(400, 48 * len(d) + 120),
+                      margin=dict(l=16, r=40, t=54, b=70),
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, xanchor="left",
+                                  bgcolor="rgba(0,0,0,0)", font=dict(size=11),
+                                  itemsizing="constant"))
+    fig.update_xaxes(title=dict(text="monthly ₹", standoff=22), tickprefix="₹",
+                     separatethousands=True, tickangle=0, automargin=True)
+    fig.update_yaxes(title_text="", automargin=True, ticklabelstandoff=8)
     return fig
 
 
@@ -246,9 +258,10 @@ def trend_line(df, xcol, ycol, title):
         fill="tozeroy", fillcolor="rgba(77,141,255,.12)",
         hovertemplate="%{x}<br>%{y:,} postings<extra></extra>"))
     sty(fig)
-    fig.update_layout(title=dict(text=title), height=380, margin=dict(l=6, r=14, t=46, b=70))
-    fig.update_xaxes(title_text="", tickangle=-40, automargin=True)
-    fig.update_yaxes(title_text="postings")
+    fig.update_layout(title=dict(text=title, x=0, xanchor="left", font=dict(size=13.5)),
+                      height=400, margin=dict(l=16, r=18, t=52, b=96))
+    fig.update_xaxes(title_text="", tickangle=-45, automargin=True, nticks=min(len(d), 14))
+    fig.update_yaxes(title_text="postings", automargin=True)
     return fig
 
 
@@ -262,7 +275,8 @@ def india_map(df, title):
     sty(fig, clip=False)
     fig.update_traces(marker_line_color="rgba(255,255,255,.12)", marker_line_width=.5,
                       hovertemplate="<b>%{location}</b><br>%{z:,} postings<extra></extra>")
-    fig.update_layout(title=dict(text=title), height=560, margin=dict(l=0, r=0, t=46, b=0),
+    fig.update_layout(title=dict(text=title, x=0, xanchor="left", font=dict(size=13.5)),
+                      height=560, margin=dict(l=0, r=0, t=52, b=0),
                       coloraxis_colorbar=dict(title="postings", thickness=12, len=.7))
     return fig
 
@@ -421,25 +435,20 @@ with tabs[0]:
         st.dataframe(disp, use_container_width=True, hide_index=True, height=360)
         dl_csv(df, fname, key=f"dl_{key}")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        panel("Most in-demand roles", rank_df("role", "role", ROLE_OK), "role",
-              "top_roles.csv", "ov_roles")
-    with c2:
-        panel("Top hiring cities", rank_df("city", "city", CITY_OK, extra_cols=False), "city",
-              "top_cities.csv", "ov_cities", color=ACCENT2)
-    c1, c2 = st.columns(2)
-    with c1:
-        emp = run(f"""SELECT company, count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
-                     count(DISTINCT role) roles, round(median(salary_monthly_min)) median_pay
-                     FROM jobs WHERE {W} AND {REAL_CO} GROUP BY 1 ORDER BY postings DESC LIMIT 50""", p)
-        panel("Most active employers", emp, "company", "top_employers.csv", "ov_emp", color=GOLD)
-    with c2:
-        stt = run(f"""SELECT state AS "state", count(*) postings,
-                     count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities, count(DISTINCT company) employers,
-                     round(median(salary_monthly_min)) median_pay
-                     FROM jobs WHERE {W} AND state<>'(unknown)' GROUP BY 1 ORDER BY postings DESC LIMIT 40""", p)
-        panel("Demand by state", stt, "state", "demand_by_state.csv", "ov_state", color=ACCENT2)
+    # full-width panels (chart + table stacked) so nothing is cramped
+    panel("Most in-demand roles", rank_df("role", "role", ROLE_OK), "role",
+          "top_roles.csv", "ov_roles")
+    panel("Top hiring cities", rank_df("city", "city", CITY_OK, extra_cols=False), "city",
+          "top_cities.csv", "ov_cities", color=ACCENT2)
+    emp = run(f"""SELECT company, count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
+                 count(DISTINCT role) roles, round(median(salary_monthly_min)) median_pay
+                 FROM jobs WHERE {W} AND {REAL_CO} GROUP BY 1 ORDER BY postings DESC LIMIT 50""", p)
+    panel("Most active employers", emp, "company", "top_employers.csv", "ov_emp", color=GOLD)
+    stt = run(f"""SELECT state AS "state", count(*) postings,
+                 count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities, count(DISTINCT company) employers,
+                 round(median(salary_monthly_min)) median_pay
+                 FROM jobs WHERE {W} AND state<>'(unknown)' GROUP BY 1 ORDER BY postings DESC LIMIT 40""", p)
+    panel("Demand by state", stt, "state", "demand_by_state.csv", "ov_state", color=ACCENT2)
 
 # ================================================================ COMPENSATION
 with tabs[1]:
