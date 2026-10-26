@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Talent Demand Intelligence -- READ-ONLY dashboard over the scraped Indian job-board data.
+Talent Demand Intelligence -- READ-ONLY dashboard over normalized Indian job-market postings.
 
 Reads ONE slim Parquet (built by export_dashboard_data.py) via DuckDB. It NEVER connects to
 Postgres and NEVER writes -- pure SELECT over a file. Every figure is an exact count from the
-data; coverage and methodology are shown openly so nothing has to be taken on trust.
+data. Each table is paired with a downloadable chart.
 
   streamlit run app.py
 """
 import os
+import json
 import duckdb
 import pandas as pd
 import plotly.express as px
@@ -17,21 +18,13 @@ import streamlit as st
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARQUET = os.path.join(HERE, "data", "jobs.parquet").replace("\\", "/")
+GEOJSON = os.path.join(HERE, "data", "india_states.geojson")
 
 st.set_page_config(page_title="Talent Demand Intelligence", page_icon="\U0001F4CA",
                    layout="wide", initial_sidebar_state="expanded")
 
-INK = ["#4f8cff", "#2bd4a7", "#f4b740", "#ff6b81", "#9b7bff", "#38bdf8", "#f97316", "#a3e635"]
-
-BOARDS = {
-    "All boards": dict(key=None,        tag="every source combined", unit="mixed"),
-    "Apna":       dict(key="apna",      tag="entry-level / blue-collar · apna.co API", unit="monthly"),
-    "WorkIndia":  dict(key="workindia", tag="blue-collar · workindia.in", unit="monthly"),
-    "Jobhai":     dict(key="jobhai",    tag="blue & grey-collar · jobhai.com", unit="monthly"),
-    "NCS":        dict(key="ncs",       tag="Govt National Career Service", unit="annual"),
-    "Foundit":    dict(key="foundit",   tag="white-collar · foundit.in", unit="annual"),
-    "Quikr":      dict(key="quikr",     tag="classifieds · quikr.com", unit="monthly"),
-}
+# chart palette (single-accent magnitude + percentile trio)
+ACCENT, ACCENT2, GOLD, MUTE = "#4d8dff", "#36d0b4", "#f4b740", "#7f8bad"
 
 # ---------------------------------------------------------------- data access (read-only)
 def _mtime():
@@ -65,9 +58,15 @@ def one(sql, params=()):
     return con().cursor().execute(sql, list(params)).fetchone()
 
 
+@st.cache_resource
+def geojson():
+    with open(GEOJSON, encoding="utf-8") as f:
+        return json.load(f)
+
+
 # ---------------------------------------------------------------- formatting
 def grp(n):
-    """Exact integer with Indian-style readability via thousands commas."""
+    """Exact integer with thousands commas."""
     try:
         return f"{int(n):,}"
     except (TypeError, ValueError):
@@ -108,7 +107,6 @@ def css():
       section[data-testid="stSidebar"][aria-expanded="false"]{width:300px !important;}
       section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarContent"]{
         visibility:visible !important; display:flex !important;}
-      /* sidebar as a control panel */
       section[data-testid="stSidebar"]{background:#080c13;border-right:1px solid var(--line);}
       section[data-testid="stSidebar"] .block-container{padding-top:1.2rem;}
       /* masthead */
@@ -146,15 +144,16 @@ def css():
       .stTabs [data-baseweb="tab"]{background:transparent;border-radius:0;padding:9px 15px;
            font-size:.8rem;font-weight:600;letter-spacing:.02em;color:var(--mut);}
       .stTabs [aria-selected="true"]{color:#fff;box-shadow:inset 0 -2px 0 #4d8dff;}
-      /* radio -> nav list */
-      section[data-testid="stSidebar"] [role="radiogroup"]{gap:1px;}
-      section[data-testid="stSidebar"] [role="radiogroup"] label{padding:3px 0;border-radius:7px;}
       /* dataframes */
       div[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:11px;overflow:hidden;}
       .stDataFrame td,.stDataFrame th{font-variant-numeric:tabular-nums;}
       /* inputs */
       section[data-testid="stSidebar"] input{background:#0b121e !important;border-color:var(--line) !important;}
       .stRadio [data-baseweb="radio"]{font-size:.84rem;}
+      /* download buttons: compact + unobtrusive */
+      .stDownloadButton button{background:#0e1726;border:1px solid var(--line2);color:#aab4c8;
+           font-size:.73rem;padding:3px 11px;border-radius:8px;}
+      .stDownloadButton button:hover{border-color:var(--acc);color:#dfe6f3;}
     </style>""", unsafe_allow_html=True)
 
 
@@ -166,12 +165,105 @@ DARK = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             yaxis=dict(gridcolor="rgba(255,255,255,.055)", zerolinecolor="rgba(255,255,255,.08)"),
             legend=dict(font=dict(size=11)))
 
+PLOT_CFG = {
+    "displayModeBar": True, "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "zoom2d", "pan2d",
+                               "zoomIn2d", "zoomOut2d", "autoScale2d", "resetScale2d"],
+    "toImageButtonOptions": {"format": "png", "filename": "talent_demand_chart", "scale": 2},
+}
 
-def sty(fig, color=None):
+
+def sty(fig, color=None, clip=True):
     fig.update_layout(**DARK)
-    fig.update_traces(cliponaxis=False)          # keep value labels from clipping at the axis edge
+    if clip:   # cliponaxis only applies to cartesian traces (bar/scatter), not choropleth
+        fig.update_traces(cliponaxis=False)      # keep value labels from clipping at the axis edge
     if color:
         fig.update_traces(marker_color=color)
+    return fig
+
+
+def show_chart(fig, key):
+    # theme=None keeps our own Plotly styling (Streamlit's theme would override colors)
+    st.plotly_chart(fig, use_container_width=True, theme=None, config=PLOT_CFG, key=key)
+
+
+def dl_csv(df, fname, key, label="⬇ Download table (CSV)"):
+    st.download_button(label, df.to_csv(index=False).encode("utf-8"),
+                       file_name=fname, mime="text/csv", key=key)
+
+
+# ---------------------------------------------------------------- chart builders
+def bar_h(df, cat, val, title, n=15, color=ACCENT):
+    """Horizontal magnitude bar — biggest on top, direct value labels."""
+    d = df.head(n).copy()[::-1]
+    fig = go.Figure(go.Bar(
+        y=d[cat].astype(str), x=d[val], orientation="h",
+        marker=dict(color=color),
+        text=[f"{int(v):,}" for v in d[val]], textposition="outside",
+        textfont=dict(color="#aab4c8", size=11),
+        hovertemplate="<b>%{y}</b><br>%{x:,} postings<extra></extra>"))
+    sty(fig)
+    fig.update_layout(title=dict(text=title), height=max(260, 30 * len(d) + 80),
+                      margin=dict(l=6, r=66, t=46, b=8))
+    fig.update_xaxes(title_text="")
+    fig.update_yaxes(title_text="", automargin=True)
+    return fig
+
+
+def dumbbell(df, cat, title, n=16):
+    """Percentile range per category: p25 — median — p75 (monthly ₹)."""
+    d = df.head(n).copy()[::-1]
+    y = d[cat].astype(str)
+    fig = go.Figure()
+    for yy, a, b in zip(y, d["p25"], d["p75"]):
+        fig.add_trace(go.Scatter(x=[a, b], y=[yy, yy], mode="lines",
+                      line=dict(color="rgba(127,139,173,.45)", width=5),
+                      hoverinfo="skip", showlegend=False))
+    fig.add_trace(go.Scatter(x=d["p25"], y=y, mode="markers", name="p25 (lower)",
+                  marker=dict(color=MUTE, size=10),
+                  hovertemplate="%{y}<br>p25 ₹%{x:,.0f}/mo<extra></extra>"))
+    fig.add_trace(go.Scatter(x=d["p75"], y=y, mode="markers", name="p75 (upper)",
+                  marker=dict(color=ACCENT2, size=10),
+                  hovertemplate="%{y}<br>p75 ₹%{x:,.0f}/mo<extra></extra>"))
+    fig.add_trace(go.Scatter(x=d["p50"], y=y, mode="markers", name="median",
+                  marker=dict(color=GOLD, size=14, line=dict(color="#0b111c", width=1.5)),
+                  hovertemplate="%{y}<br>median ₹%{x:,.0f}/mo<extra></extra>"))
+    sty(fig)
+    fig.update_layout(title=dict(text=title), height=max(320, 34 * len(d) + 110),
+                      margin=dict(l=6, r=18, t=58, b=8),
+                      legend=dict(orientation="h", y=1.07, x=0, yanchor="bottom"))
+    fig.update_xaxes(title_text="monthly ₹", tickprefix="₹", separatethousands=True)
+    fig.update_yaxes(title_text="", automargin=True)
+    return fig
+
+
+def trend_line(df, xcol, ycol, title):
+    """Change-over-time: filled line, chronological left→right."""
+    d = df.copy()
+    fig = go.Figure(go.Scatter(
+        x=d[xcol].astype(str), y=d[ycol], mode="lines+markers",
+        line=dict(color=ACCENT, width=2.5), marker=dict(size=6, color=ACCENT),
+        fill="tozeroy", fillcolor="rgba(77,141,255,.12)",
+        hovertemplate="%{x}<br>%{y:,} postings<extra></extra>"))
+    sty(fig)
+    fig.update_layout(title=dict(text=title), height=380, margin=dict(l=6, r=14, t=46, b=70))
+    fig.update_xaxes(title_text="", tickangle=-40, automargin=True)
+    fig.update_yaxes(title_text="postings")
+    return fig
+
+
+def india_map(df, title):
+    """Choropleth of India shaded by posting volume per state."""
+    fig = px.choropleth(
+        df, geojson=geojson(), featureidkey="properties.ST_NM",
+        locations="state", color="postings",
+        color_continuous_scale=["#0d1b30", "#163a73", "#2f6ae0", "#4d8dff", "#86b4ff"])
+    fig.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)")
+    sty(fig, clip=False)
+    fig.update_traces(marker_line_color="rgba(255,255,255,.12)", marker_line_width=.5,
+                      hovertemplate="<b>%{location}</b><br>%{z:,} postings<extra></extra>")
+    fig.update_layout(title=dict(text=title), height=560, margin=dict(l=0, r=0, t=46, b=0),
+                      coloraxis_colorbar=dict(title="postings", thickness=12, len=.7))
     return fig
 
 
@@ -182,14 +274,11 @@ def kpi_row(items):
     st.markdown(html + "</div>", unsafe_allow_html=True)
 
 
-# ---------------------------------------------------------------- sidebar: board + filters
+# ---------------------------------------------------------------- sidebar: filters
 EXP_BANDS = ["Fresher", "0–1 yrs", "1–3 yrs", "3–5 yrs", "5–8 yrs", "8–12 yrs", "12+ yrs"]
 css()
 with st.sidebar:
     st.markdown("### \U0001F4CA Talent Demand Intelligence")
-    board_name = st.radio("Source", list(BOARDS.keys()))
-    B = BOARDS[board_name]
-    st.divider()
     st.markdown("#### Filters")
     families_all = [r[0] for r in con().cursor().execute(
         "SELECT DISTINCT job_family FROM jobs ORDER BY 1").fetchall()]
@@ -213,21 +302,32 @@ with st.sidebar:
     sel_states = st.multiselect("State", states_all, placeholder="all states")
     sectors_all = [r[0] for r in con().cursor().execute(
         "SELECT DISTINCT industry_sector FROM jobs WHERE industry_sector IS NOT NULL ORDER BY 1").fetchall()]
-    sel_sectors = st.multiselect("Industry sector", sectors_all, placeholder="all sectors (Foundit)",
-                                 help="True industry sector — supplied by Foundit only (~7% of all jobs).")
+    sel_sectors = st.multiselect("Industry sector", sectors_all, placeholder="all sectors",
+                                 help="Classified industry sector — available for ~7% of postings.")
     sel_exp = st.multiselect("Experience", EXP_BANDS, placeholder="all experience levels")
     sel_gender = st.multiselect("Gender preference", ["Male only", "Female only", "Any (Both)"],
                                 placeholder="any gender preference",
-                                help="Gender stated in the posting — apna/workindia/quikr supply it (~22% of all jobs).")
+                                help="Gender stated in the posting — specified on ~22% of postings.")
+    # ---- date filter: All dates / Single day / Date range -------------------------------
     dmin, dmax = one("SELECT min(posted_on), max(posted_on) FROM jobs")
     dmin, dmax = pd.to_datetime(dmin).date(), pd.to_datetime(dmax).date()
-    date_range = st.date_input("Posted between", value=(dmin, dmax), min_value=dmin, max_value=dmax)
+    st.markdown("###### Posted date")
+    date_mode = st.radio("Posting date filter", ["All dates", "Single day", "Date range"],
+                         index=0, horizontal=True, label_visibility="collapsed")
+    one_day = None
+    date_range = None
+    if date_mode == "Single day":
+        one_day = st.date_input("Pick a day", value=dmax, min_value=dmin, max_value=dmax,
+                                format="YYYY/MM/DD", help="Show postings from this exact date.")
+    elif date_mode == "Date range":
+        date_range = st.date_input("Pick a start and end date", value=(dmin, dmax),
+                                   min_value=dmin, max_value=dmax, format="YYYY/MM/DD",
+                                   help="Click a start date, then an end date. The filter applies "
+                                        "once both are chosen.")
     wfh_only = st.checkbox("Work-from-home only")
 
 # WHERE builder
 where, p = ["1=1"], []
-if B["key"]:
-    where.append("board = ?"); p.append(B["key"])
 if kw:
     where.append("title ILIKE ?"); p.append(f"%{kw}%")
 if f_company:
@@ -248,8 +348,10 @@ if sel_exp:
     where.append(f"exp_band IN ({','.join(['?']*len(sel_exp))})"); p += sel_exp
 if sel_gender:
     where.append(f"gender_norm IN ({','.join(['?']*len(sel_gender))})"); p += sel_gender
-if (isinstance(date_range, (list, tuple)) and len(date_range) == 2
-        and (date_range[0] != dmin or date_range[1] != dmax)):   # only filter if narrowed (keeps null-date rows in totals)
+# date filter (only narrows the data; otherwise null-date rows stay counted in totals)
+if date_mode == "Single day" and one_day is not None:
+    where.append("posted_on::date = ?"); p.append(one_day)
+elif date_mode == "Date range" and isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     where.append("posted_on::date BETWEEN ? AND ?"); p += [date_range[0], date_range[1]]
 if wfh_only:
     where.append("is_wfh = TRUE")
@@ -265,16 +367,16 @@ REAL_CO = ("company IS NOT NULL AND company<>'(not specified)' AND company NOT I
 asof = pd.to_datetime(_mtime(), unit="s")
 st.markdown(f"""<div class="mast"><div class="mark"></div>
   <div><h1>Talent Demand Intelligence</h1>
-       <div class="sub">{board_name} &nbsp;·&nbsp; {B['tag']}</div></div>
+       <div class="sub">All-India job-market postings &nbsp;·&nbsp; normalized &amp; de-duplicated</div></div>
   <div class="status"><span class="dot"></span>live snapshot · {asof:%d %b %Y, %H:%M}<br>
-       read-only · exact counts from source</div></div>""", unsafe_allow_html=True)
+       read-only · exact counts</div></div>""", unsafe_allow_html=True)
 
 k = run(f"""SELECT count(*) jobs, count(DISTINCT company) comp, count(DISTINCT role) roles,
             count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
             count(DISTINCT state) FILTER(WHERE state<>'(unknown)') states,
             count(salary_monthly_min) sal_n,
             round(median(salary_monthly_min)) sal_med,
-            min(posted_on::date) dmin, max(posted_on::date) dmax, count(DISTINCT board) brds
+            min(posted_on::date) dmin, max(posted_on::date) dmax
             FROM jobs WHERE {W}""", p).iloc[0]
 
 if int(k.jobs) == 0:
@@ -283,7 +385,7 @@ if int(k.jobs) == 0:
 
 sal_cov = 100 * int(k.sal_n) / int(k.jobs)
 kpi_row([
-    ("Job postings", grp(k.jobs), f"{board_name}"),
+    ("Job postings", grp(k.jobs), "matching your filters"),
     ("Hiring companies", grp(k.comp), "distinct employers"),
     ("Distinct roles", grp(k.roles), "job titles / roles"),
     ("Cities · States", f"{grp(k.cities)} · {int(k.states)}", "normalized geography"),
@@ -292,55 +394,59 @@ kpi_row([
 ])
 
 tabs = st.tabs(["Overview", "Compensation", "Demand", "Geography", "Hiring trends",
-                "Employers", "Data & methodology", "Job records"])
+                "Employers", "Job records"])
 
 # ================================================================ OVERVIEW
 with tabs[0]:
-    st.markdown('<div class="note">Exact counts of job postings from the sources, de-duplicated by job id. '
-                'Click any column header to sort. The sidebar filters — including <b>Company contains</b> '
-                '— apply to every table here. "(not specified)"/placeholder buckets are excluded from these '
-                'ranked lists but remain in the totals above.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="note">Exact counts of job postings, de-duplicated by posting id. Each '
+                'chart is downloadable (hover → camera icon); tables download as CSV. The sidebar '
+                'filters apply everywhere. "(not specified)"/placeholder buckets are excluded from '
+                'these ranked lists but remain in the totals above.</div>', unsafe_allow_html=True)
 
-    def rank(dim, label, ok, extra_cols=True):
+    def rank_df(dim, label, ok, extra_cols=True):
         extra = (", count(DISTINCT company) employers, count(DISTINCT city) FILTER(WHERE {c}) cities, "
                  "round(median(salary_monthly_min)) median_pay").format(c=CITY_OK) if extra_cols else \
                 ", count(DISTINCT company) employers, round(median(salary_monthly_min)) median_pay"
         df = run(f"""SELECT {dim} AS "{label}", count(*) postings{extra}
                      FROM jobs WHERE {W} AND {ok} GROUP BY 1 ORDER BY postings DESC LIMIT 50""", p)
-        if "median_pay" in df:
-            df["median_pay"] = df["median_pay"].map(inr)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+        return df
+
+    def panel(title, df, cat, fname, key, color=ACCENT):
+        st.markdown(f'<div class="sec">{title}</div>', unsafe_allow_html=True)
+        if len(df):
+            show_chart(bar_h(df, cat, "postings", f"Top 15 · {title.lower()}", color=color), key=f"ch_{key}")
+        disp = df.copy()
+        if "median_pay" in disp:
+            disp["median_pay"] = disp["median_pay"].map(inr)
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=360)
+        dl_csv(df, fname, key=f"dl_{key}")
 
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown('<div class="sec">Most in-demand roles</div>', unsafe_allow_html=True)
-        rank("role", "role", ROLE_OK)
+        panel("Most in-demand roles", rank_df("role", "role", ROLE_OK), "role",
+              "top_roles.csv", "ov_roles")
     with c2:
-        st.markdown('<div class="sec">Top hiring cities</div>', unsafe_allow_html=True)
-        rank("city", "city", CITY_OK, extra_cols=False)
+        panel("Top hiring cities", rank_df("city", "city", CITY_OK, extra_cols=False), "city",
+              "top_cities.csv", "ov_cities", color=ACCENT2)
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown('<div class="sec">Most active employers</div>', unsafe_allow_html=True)
-        df = run(f"""SELECT company, count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
+        emp = run(f"""SELECT company, count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
                      count(DISTINCT role) roles, round(median(salary_monthly_min)) median_pay
                      FROM jobs WHERE {W} AND {REAL_CO} GROUP BY 1 ORDER BY postings DESC LIMIT 50""", p)
-        df["median_pay"] = df["median_pay"].map(inr)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+        panel("Most active employers", emp, "company", "top_employers.csv", "ov_emp", color=GOLD)
     with c2:
-        st.markdown('<div class="sec">Demand by state</div>', unsafe_allow_html=True)
-        df = run(f"""SELECT state AS "state", count(*) postings,
+        stt = run(f"""SELECT state AS "state", count(*) postings,
                      count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities, count(DISTINCT company) employers,
                      round(median(salary_monthly_min)) median_pay
                      FROM jobs WHERE {W} AND state<>'(unknown)' GROUP BY 1 ORDER BY postings DESC LIMIT 40""", p)
-        df["median_pay"] = df["median_pay"].map(inr)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+        panel("Demand by state", stt, "state", "demand_by_state.csv", "ov_state", color=ACCENT2)
 
 # ================================================================ COMPENSATION
 with tabs[1]:
     st.markdown('<div class="note">Pay is normalized to <b>monthly ₹</b> for comparability '
-                '(apna/workindia/jobhai/quikr are monthly; foundit/ncs are annual → ÷12). '
-                'Values of 0 = "not disclosed" (excluded); figures clipped to ₹3k–₹50L/month to drop junk. '
-                '<b>p25 / p50 / p75</b> = 25th / median / 75th percentile.</div>', unsafe_allow_html=True)
+                '(postings quoting an annual figure are divided by 12). Values of 0 = "not disclosed" '
+                '(excluded); figures clipped to ₹3k–₹50L/month to drop junk. '
+                '<b>p25 / median / p75</b> = 25th / 50th / 75th percentile.</div>', unsafe_allow_html=True)
     cov = run(f"""SELECT count(*) n, count(salary_monthly_min) disc,
                   round(quantile_cont(salary_monthly_min,0.25)) p25,
                   round(quantile_cont(salary_monthly_min,0.50)) p50,
@@ -354,10 +460,10 @@ with tabs[1]:
         ("p75 monthly", inr(cov.p75), "upper quartile"),
     ])
     dim = st.radio("Break pay down by",
-                   ["Job family", "Sub-category", "Role", "City", "Experience band", "Industry sector", "Board"],
+                   ["Job family", "Sub-category", "Role", "City", "Experience band", "Industry sector"],
                    horizontal=True)
     col = {"Job family": "job_family", "Sub-category": "sub_family", "Role": "role", "City": "city",
-           "Experience band": None, "Industry sector": "industry_sector", "Board": "board"}[dim]
+           "Experience band": None, "Industry sector": "industry_sector"}[dim]
     if dim == "Experience band":
         q_ = f"""SELECT exp_band band,
                  count(salary_monthly_min) n,
@@ -370,8 +476,9 @@ with tabs[1]:
                                     WHEN '12+ yrs' THEN 6 ELSE 7 END"""
         df = run(q_, p)
         xcol = "band"
+        ordered = True
     else:
-        ok = {"role": ROLE_OK, "city": CITY_OK, "board": "1=1", "job_family": "1=1",
+        ok = {"role": ROLE_OK, "city": CITY_OK, "job_family": "1=1",
               "sub_family": "1=1", "industry_sector": "industry_sector IS NOT NULL"}[col]
         df = run(f"""SELECT {col} AS "{col}", count(salary_monthly_min) n,
                      round(quantile_cont(salary_monthly_min,0.25)) p25,
@@ -380,22 +487,27 @@ with tabs[1]:
                      FROM jobs WHERE {W} AND salary_monthly_min IS NOT NULL AND {ok}
                      GROUP BY 1 HAVING count(salary_monthly_min)>=30 ORDER BY n DESC LIMIT 18""", p)
         xcol = col
+        ordered = False
     if len(df):
+        st.markdown(f'<div class="sec">Monthly ₹ pay by {dim.lower()}</div>', unsafe_allow_html=True)
+        # dumbbell wants the strongest groups; for experience keep the natural band order
+        chart_df = df if ordered else df.head(16)
+        show_chart(dumbbell(chart_df, xcol, f"Pay range (p25–median–p75) by {dim.lower()}"), key="cmp_db")
         disp = df.copy()
         for cc in ("p25", "p50", "p75"):
             disp[cc] = disp[cc].map(inr)
         disp = disp.rename(columns={"n": "postings w/ pay", "p25": "p25 /mo", "p50": "median /mo", "p75": "p75 /mo"})
-        st.markdown(f'<div class="sec">Monthly ₹ pay by {dim.lower()}</div>', unsafe_allow_html=True)
-        st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
-        st.markdown('<div class="cap">Sorted by number of postings. Only groups with ≥30 disclosed '
-                    'salaries are shown, so the percentiles are statistically stable. Click a header to re-sort.</div>',
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=460)
+        dl_csv(df, "pay_by_%s.csv" % col if col else "pay_by_experience.csv", key="cmp_dl")
+        st.markdown('<div class="cap">Only groups with ≥30 disclosed salaries are shown, so the '
+                    'percentiles are statistically stable. The dot is the median; the bar spans p25–p75.</div>',
                     unsafe_allow_html=True)
     else:
         st.info("Not enough disclosed salaries in this selection to compute stable percentiles.")
 
 # ================================================================ DEMAND
 with tabs[2]:
-    def explorer(dim, label, ok):
+    def explorer(dim, label, ok, color=ACCENT):
         st.markdown(f'<div class="sec">All {label} (complete — search any value)</div>', unsafe_allow_html=True)
         find = st.text_input(f"Search {label}", key=f"s_{dim}", placeholder=f"type any {label[:-1]}…")
         w2, p2 = f"{W} AND {ok}", list(p)
@@ -403,78 +515,94 @@ with tabs[2]:
             w2 += f" AND {dim} ILIKE ?"; p2 += [f"%{find}%"]
         total = one(f"SELECT count(DISTINCT {dim}) FROM jobs WHERE {w2}", p2)[0]
         if not total and not find:
-            st.info(f"**{board_name}** doesn’t provide {label}. Try another board, or switch Source to "
-                    f"“All boards”.")
+            st.info(f"This field isn’t available for the current selection. Clear some filters to see it.")
             return
         df = run(f"""SELECT {dim} AS "{label[:-1]}", count(*) postings,
                      count(DISTINCT company) employers,
                      count(salary_monthly_min) with_pay,
                      round(median(salary_monthly_min)) median_monthly
                      FROM jobs WHERE {w2} GROUP BY 1 ORDER BY postings DESC LIMIT 500""", p2)
-        df["median_monthly"] = df["median_monthly"].map(inr)
+        if len(df):
+            show_chart(bar_h(df, label[:-1], "postings", f"Top 15 · {label}", color=color), key=f"dm_ch_{dim}")
+        dfd = df.copy()
+        dfd["median_monthly"] = dfd["median_monthly"].map(inr)
         st.caption(f"{total:,} distinct {label} match — top 500 by postings (search to reach any one).")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(dfd, use_container_width=True, hide_index=True, height=380)
+        dl_csv(df, f"{label.replace(' ', '_')}.csv", key=f"dm_dl_{dim}")
 
     sub = st.radio("Dimension", ["Roles", "Industry sector", "Skills", "Gender", "Work type"], horizontal=True)
     if sub == "Roles":
         explorer("role", "roles", ROLE_OK)
     elif sub == "Gender":
-        st.markdown('<div class="note">Gender preference <b>as stated in the posting</b>. Supplied by '
-                    'WorkIndia (100%), apna (12%) and quikr; jobhai/ncs/foundit don’t state it — so overall '
-                    'about ~22% of postings specify a preference. A sobering look at hiring bias in the market.</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="note">Gender preference <b>as stated in the posting</b> — specified on '
+                    'about ~22% of postings (the rest state no preference). A sobering look at hiring '
+                    'bias in the market.</div>', unsafe_allow_html=True)
         gdf = run(f"""SELECT gender_norm AS "gender preference", count(*) postings,
                       count(DISTINCT company) employers, count(salary_monthly_min) with_pay,
                       round(median(salary_monthly_min)) median_monthly
                       FROM jobs WHERE {W} GROUP BY 1 ORDER BY postings DESC""", p)
-        gdf["median_monthly"] = gdf["median_monthly"].map(inr)
-        st.dataframe(gdf, use_container_width=True, hide_index=True)
+        if len(gdf):
+            show_chart(bar_h(gdf, "gender preference", "postings", "Postings by stated gender preference",
+                             n=10, color=GOLD), key="dm_gender")
+        gdisp = gdf.copy()
+        gdisp["median_monthly"] = gdisp["median_monthly"].map(inr)
+        st.dataframe(gdisp, use_container_width=True, hide_index=True)
+        dl_csv(gdf, "gender_preference.csv", key="dm_dl_gender")
     elif sub == "Industry sector":
-        st.markdown('<div class="note">A true <b>industry sector</b> is supplied only by Foundit (as a '
-                    'classified field), so this view covers ~7% of all postings. We deliberately do not treat '
-                    'other boards’ "industry" field (which is really a job-category) as an industry sector '
-                    '— those are reflected in the Job family / Sub-category instead.</div>',
-                    unsafe_allow_html=True)
-        explorer("industry_sector", "industry sectors", "industry_sector IS NOT NULL")
+        st.markdown('<div class="note">A classified <b>industry sector</b> is available for ~7% of '
+                    'postings. Broader job categories are reflected in the Job family / Sub-category '
+                    'instead.</div>', unsafe_allow_html=True)
+        explorer("industry_sector", "industry sectors", "industry_sector IS NOT NULL", color=ACCENT2)
     elif sub == "Skills":
-        st.markdown('<div class="note">Skills are free-text and present on ~38% of postings '
-                    '(ncs/foundit/workindia strongest). Shown as provided, exact counts.</div>', unsafe_allow_html=True)
-        explorer("skills", "skills", "skills IS NOT NULL AND skills<>''")
+        st.markdown('<div class="note">Skills are free-text and present on ~38% of postings. '
+                    'Shown as provided, exact counts.</div>', unsafe_allow_html=True)
+        explorer("skills", "skills", "skills IS NOT NULL AND skills<>''", color=ACCENT2)
     else:
         df = run(f"""SELECT coalesce(employment_type_norm,'(unspecified)') AS "work type", count(*) postings
                      FROM jobs WHERE {W} GROUP BY 1 ORDER BY postings DESC LIMIT 12""", p)
+        if len(df):
+            show_chart(bar_h(df, "work type", "postings", "Postings by work type", n=10, color=ACCENT),
+                       key="dm_worktype")
         st.dataframe(df, use_container_width=True, hide_index=True)
+        dl_csv(df, "work_type.csv", key="dm_dl_worktype")
         wfh = run(f"SELECT count(*) FILTER(WHERE is_wfh) w, count(*) n FROM jobs WHERE {W}", p).iloc[0]
         st.markdown(f'<div class="cap">Work-from-home flag set on {grp(wfh.w)} of {grp(wfh.n)} postings '
-                    f'({100*int(wfh.w)/max(int(wfh.n),1):.1f}%). Only apna & jobhai reliably flag WFH, '
-                    f'so this undercounts true remote roles.</div>', unsafe_allow_html=True)
+                    f'({100*int(wfh.w)/max(int(wfh.n),1):.1f}%). WFH is flagged on only a subset of '
+                    f'postings, so this undercounts true remote roles.</div>', unsafe_allow_html=True)
 
 # ================================================================ GEOGRAPHY
 with tabs[3]:
-    st.markdown('<div class="note">City & state are normalized from each board’s raw location '
-                '(e.g. "Bengaluru/Bangalore", "Bengaluru, India", "Whitefield, Bangalore" → '
-                '<b>Bengaluru, Karnataka</b>). Raw location is retained in the job records tab.</div>',
-                unsafe_allow_html=True)
-    if B["key"] == "ncs":
-        st.warning("**NCS lists location at state/region level only** — a real city exists for just ~7% of "
-                   "NCS jobs, so the Cities table is sparse and odd regional names (e.g. “Central Region "
-                   "Trichirapalli”) are NCS’s own wording. Use the **States** panel for NCS geography.")
+    st.markdown('<div class="note">City & state are normalized from each posting’s raw location '
+                '(e.g. "Bengaluru/Bangalore", "Whitefield, Bangalore" → <b>Bengaluru, Karnataka</b>). '
+                'Raw location is retained in the Job records tab.</div>', unsafe_allow_html=True)
+    mp = run(f"""SELECT state, count(*) postings FROM jobs
+                 WHERE {W} AND state<>'(unknown)' GROUP BY 1 ORDER BY 2 DESC""", p)
+    if len(mp):
+        st.markdown('<div class="sec">Postings across India</div>', unsafe_allow_html=True)
+        show_chart(india_map(mp, "Job postings by state"), key="geo_map")
+        dl_csv(mp, "postings_by_state.csv", key="geo_dl_state")
     c1, c2 = st.columns([3, 2])
     with c1:
         df = run(f"""SELECT city, any_value(state) AS "state", count(*) postings,
                      count(DISTINCT company) employers, round(median(salary_monthly_min)) median_monthly
                      FROM jobs WHERE {W} AND {CITY_OK} GROUP BY 1 ORDER BY postings DESC LIMIT 400""", p)
-        df["median_monthly"] = df["median_monthly"].map(inr)
         tot = one(f"SELECT count(DISTINCT city) FROM jobs WHERE {W} AND {CITY_OK}", p)[0]
-        st.markdown('<div class="sec">Cities</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">Top cities</div>', unsafe_allow_html=True)
+        if len(df):
+            show_chart(bar_h(df, "city", "postings", "Top 15 cities by postings", color=ACCENT2),
+                       key="geo_cities_ch")
+        dfd = df.copy()
+        dfd["median_monthly"] = dfd["median_monthly"].map(inr)
         st.caption(f"{tot:,} normalized cities — top 400 by postings.")
-        st.dataframe(df, use_container_width=True, hide_index=True, height=440)
+        st.dataframe(dfd, use_container_width=True, hide_index=True, height=440)
+        dl_csv(df, "top_cities_full.csv", key="geo_dl_city")
     with c2:
         dfs = run(f"""SELECT state AS "state", count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities
                       FROM jobs WHERE {W} AND state<>'(unknown)' GROUP BY 1 ORDER BY postings DESC""", p)
         st.markdown('<div class="sec">States</div>', unsafe_allow_html=True)
         st.caption(f"{len(dfs)} states · covers {int(k.states)} with known geography.")
         st.dataframe(dfs, use_container_width=True, hide_index=True, height=440)
+        dl_csv(dfs, "states.csv", key="geo_dl_states2")
 
 # ================================================================ HIRING TRENDS
 with tabs[4]:
@@ -499,9 +627,9 @@ with tabs[4]:
     else:
         per = "strftime(date_trunc('month', posted_on), '%Y-%m')"
     label = "day" if g == "Daily" else ("week" if g == "Weekly" else "month")
-    st.markdown('<div class="note">Job postings counted by their <b>posting date</b> (the real post date '
-                'from each source), newest first. Weekly/monthly rows are labelled by the <b>start</b> of that '
-                'week/month. The latest period is partial (still in progress), so it reads low. '
+    st.markdown('<div class="note">Job postings counted by their <b>posting date</b>, newest first. '
+                'Weekly/monthly rows are labelled by the <b>start</b> of that week/month. '
+                'The latest period is partial (still in progress), so it reads low. '
                 '<b>change</b> = vs. the previous period.</div>', unsafe_allow_html=True)
     if g == "Daily":
         df = run(f"SELECT {per} AS date, dayname(posted_on) AS weekday, count(*) postings "
@@ -511,17 +639,13 @@ with tabs[4]:
         df = run(f"SELECT {per} AS period, count(*) postings FROM jobs WHERE {Wt} GROUP BY 1 ORDER BY 1", pt)
         key_col = "period"
     if len(df):
-        df["change"] = df["postings"].pct_change().map(lambda v: f"{v*100:+.0f}%" if pd.notna(v) else "—")
-        df = df.iloc[::-1].reset_index(drop=True)
+        show_chart(trend_line(df, key_col, "postings", f"Postings per {label} · {win}"), key="trend_ch")
+        tbl = df.copy()
+        tbl["change"] = tbl["postings"].pct_change().map(lambda v: f"{v*100:+.0f}%" if pd.notna(v) else "—")
+        tbl = tbl.iloc[::-1].reset_index(drop=True)
         st.markdown(f'<div class="sec">Postings per {label} · {win}</div>', unsafe_allow_html=True)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=460)
-    if not B["key"]:
-        st.markdown(f'<div class="sec">Postings per {label} by source</div>', unsafe_allow_html=True)
-        dfb = run(f"SELECT {per} AS {key_col}, board, count(*) n FROM jobs WHERE {Wt} GROUP BY 1,2", pt)
-        if len(dfb):
-            piv = dfb.pivot(index=key_col, columns="board", values="n").fillna(0).astype(int)
-            piv = piv.sort_index(ascending=False).reset_index()
-            st.dataframe(piv, use_container_width=True, hide_index=True, height=460)
+        st.dataframe(tbl, use_container_width=True, hide_index=True, height=420)
+        dl_csv(tbl, f"postings_per_{label}.csv", key="trend_dl")
 
 # ================================================================ EMPLOYERS
 with tabs[5]:
@@ -536,65 +660,35 @@ with tabs[5]:
     df = run(f"""SELECT company, count(*) postings, count(DISTINCT city) FILTER(WHERE {CITY_OK}) cities,
                  count(DISTINCT role) roles, round(median(salary_monthly_min)) median_monthly
                  FROM jobs WHERE {w2} GROUP BY 1 ORDER BY postings DESC LIMIT 500""", p2)
-    df["median_monthly"] = df["median_monthly"].map(inr)
+    if len(df):
+        show_chart(bar_h(df, "company", "postings", "Top 15 most active employers", color=GOLD),
+                   key="emp_ch")
+    dfd = df.copy()
+    dfd["median_monthly"] = dfd["median_monthly"].map(inr)
     st.caption(f"{total:,} distinct named employers match — top 500 by postings.")
-    st.dataframe(df, use_container_width=True, hide_index=True, height=520)
-
-# ================================================================ DATA & METHODOLOGY
-with tabs[6]:
-    st.markdown('<div class="sec">Record counts & field coverage by source</div>', unsafe_allow_html=True)
-    st.markdown('<div class="cap">Every percentage is a live count over the current filter. This is the '
-                'full picture of what is and isn’t captured — nothing is hidden.</div>', unsafe_allow_html=True)
-    cov = run(f"""SELECT board,
-      count(*) postings,
-      round(100.0*count(*) FILTER(WHERE title IS NOT NULL AND title<>'')/count(*)) AS "title",
-      round(100.0*count(*) FILTER(WHERE {CITY_OK})/count(*)) AS "city",
-      round(100.0*count(*) FILTER(WHERE state<>'(unknown)')/count(*)) AS "state",
-      round(100.0*count(*) FILTER(WHERE {ROLE_OK})/count(*)) AS "role",
-      round(100.0*count(*) FILTER(WHERE industry IS NOT NULL AND industry<>'')/count(*)) AS "industry",
-      round(100.0*count(salary_monthly_min)/count(*)) AS "pay",
-      round(100.0*count(exp_years)/count(*)) AS "experience",
-      round(100.0*count(*) FILTER(WHERE skills IS NOT NULL AND skills<>'')/count(*)) AS "skills",
-      round(100.0*count(*) FILTER(WHERE posted_on IS NOT NULL)/count(*)) AS "posted"
-      FROM jobs WHERE {W} GROUP BY 1 ORDER BY postings DESC""", p)
-    for cc in ["title", "city", "state", "role", "industry", "pay", "experience", "skills", "posted"]:
-        cov[cc] = cov[cc].map(lambda v: f"{int(v)}%" if pd.notna(v) else "—")
-    st.dataframe(cov, use_container_width=True, hide_index=True)
-    st.markdown("""<div class="note" style="margin-top:14px;">
-      <b>Methodology.</b><br>
-      • <b>Sources</b>: apna.co, workindia.in, jobhai.com, ncs.gov.in, foundit.in, quikr.com — public
-      listings only. <b>De-duplication</b>: by each source’s native job id; a job is counted once.<br>
-      • <b>Posting date</b>: the real date from each source (apna created_on, workindia created_at,
-      jobhai URL epoch, ncs page date, foundit datePosted, quikr JSON-LD datePosted), standardized to IST.<br>
-      • <b>Geography</b>: raw location → canonical city + state via an alias/locality map; raw kept.<br>
-      • <b>Pay</b>: normalized to monthly ₹ (foundit/ncs annual ÷12); 0 = not disclosed; clipped to
-      ₹3k–₹50L/month. Disclosure rates vary by source (see "pay" column) and are shown, never hidden.<br>
-      • <b>Not inflated</b>: ranked lists drop "(not specified)"/placeholder buckets but totals keep them;
-      "distinct roles/companies" are raw source values, not merged.<br>
-      • <b>Read-only</b>: this dashboard only reads a data snapshot; it never writes to the database.
-    </div>""", unsafe_allow_html=True)
+    st.dataframe(dfd, use_container_width=True, hide_index=True, height=460)
+    dl_csv(df, "employers.csv", key="emp_dl")
 
 # ================================================================ JOB RECORDS
-with tabs[7]:
+with tabs[6]:
     st.caption(f"{grp(k.jobs)} postings match. Showing the 1,000 most recent; download the full "
-               f"filtered set below. Each row links to the live posting.")
-    rows = run(f"""SELECT board, title, company, city, state, job_family, sub_family, role,
+               f"filtered set below.")
+    rows = run(f"""SELECT title, company, city, state, job_family, sub_family, role,
                    industry_sector, salary_monthly_min, salary_monthly_max, experience, exp_band,
-                   employment_type_norm AS work_type, is_wfh, posted_on, url
+                   employment_type_norm AS work_type, is_wfh, posted_on
                    FROM jobs WHERE {W} ORDER BY posted_on DESC NULLS LAST LIMIT 1000""", p)
     st.dataframe(rows, use_container_width=True, hide_index=True, height=560, column_config={
-        "url": st.column_config.LinkColumn("link", display_text="open ↗"),
         "posted_on": st.column_config.DatetimeColumn("posted", format="YYYY-MM-DD"),
         "salary_monthly_min": st.column_config.NumberColumn("pay min/mo", format="₹%d"),
         "salary_monthly_max": st.column_config.NumberColumn("pay max/mo", format="₹%d")})
-    # build the full CSV only on demand (keeps memory flat; 900k+ rows aren't materialized on every view)
+    # build the full CSV only on demand (keeps memory flat; 1M+ rows aren't materialized on every view)
     if st.checkbox(f"Prepare download of all {grp(k.jobs)} filtered records"):
-        full = con().cursor().execute(f"""SELECT board, job_id, title, company, city, state, location,
+        full = con().cursor().execute(f"""SELECT title, company, city, state, location,
                    job_family, sub_family, role, industry, industry_sector,
                    salary_min, salary_max, salary_monthly_min, salary_monthly_max,
                    experience, exp_min_years, exp_max_years, exp_band,
-                   employment_type, employment_type_norm, education, skills, is_wfh, posted_on, url
+                   employment_type, employment_type_norm, education, skills, is_wfh, posted_on
                    FROM jobs WHERE {W} ORDER BY posted_on DESC NULLS LAST""", p).df()
         st.download_button(f"⬇ Download CSV ({grp(len(full))} rows)",
                            full.to_csv(index=False).encode("utf-8"),
-                           file_name=f"{(B['key'] or 'all')}_talent_demand.csv", mime="text/csv")
+                           file_name="talent_demand.csv", mime="text/csv")
